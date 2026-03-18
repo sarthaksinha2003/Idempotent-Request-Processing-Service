@@ -46,6 +46,17 @@ public class IdempotencyService {
 
         if (cachedResponse != null) {
             log.debug("Cache HIT for key: {}", idempotencyKey);
+
+            // Check payload hash even on cache hit
+            String requestHash = hashUtil.computeHash(payload);
+            String storedHash = redisTemplate.opsForValue()
+                    .get(hashCacheKey(idempotencyKey));
+
+            if (storedHash != null && !storedHash.equals(requestHash)) {
+                log.warn("Payload mismatch on cache hit for key: {}", idempotencyKey);
+                throw new IdempotencyKeyConflictException(idempotencyKey);
+            }
+
             IdempotencyRecord cached = new IdempotencyRecord();
             cached.setIdempotencyKey(idempotencyKey);
             cached.setStatus(IdempotencyStatus.COMPLETED);
@@ -114,10 +125,16 @@ public class IdempotencyService {
             record.setResourceId(resourceId);
             recordRepository.save(record);
 
-            // Populate Redis cache
+            // Populate Redis cache with response
             redisTemplate.opsForValue().set(
                     cacheKey(idempotencyKey),
                     responseJson,
+                    Duration.ofHours(24));
+
+            // Store request hash in Redis for mismatch detection on cache hit
+            redisTemplate.opsForValue().set(
+                    hashCacheKey(idempotencyKey),
+                    record.getRequestHash(),
                     Duration.ofHours(24));
 
             log.info("Marked COMPLETED for key: {}", idempotencyKey);
@@ -175,5 +192,9 @@ public class IdempotencyService {
 
     private String getInstanceId() {
         return System.getenv().getOrDefault("HOSTNAME", "local-instance");
+    }
+
+    private String hashCacheKey(String idempotencyKey) {
+        return CACHE_PREFIX + idempotencyKey + ":hash";
     }
 }
