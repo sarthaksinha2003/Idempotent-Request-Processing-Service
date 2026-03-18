@@ -59,4 +59,13 @@ public class IdempotencyRecord {
 
     @Column(nullable = false)
     private LocalDateTime expiresAt;
+
+    public boolean isInProgress() {
+        return IdempotencyStatus.IN_PROGRESS.equals(this.status);
+    }
+
+    public boolean isTerminal() {
+        return IdempotencyStatus.COMPLETED.equals(this.status)
+                || IdempotencyStatus.FAILED.equals(this.status);
+    }
 }
