@@ -15,6 +15,7 @@ This project solves a core distributed systems problem commonly seen in banking 
 - [Prerequisites](#prerequisites)
 - [Getting Started](#getting-started)
 - [Configuration](#configuration)
+- [Client Integration Guide](#client-integration-guide)
 - [API Reference](#api-reference)
 - [Error Responses](#error-responses)
 - [Idempotency Behaviour Matrix](#idempotency-behaviour-matrix)
@@ -180,6 +181,64 @@ Hibernate will auto-create the database tables on first run.
 
 ---
 
+## Client Integration Guide
+
+This section is for developers integrating with this API.
+
+### Generating the Idempotency Key
+
+Generate a UUID **before** sending the request — not after. The key must exist locally before any network call happens so it survives network failures.
+```java
+// Java
+String key = UUID.randomUUID().toString();
+```
+```javascript
+// JavaScript
+const key = crypto.randomUUID();
+```
+```python
+# Python
+import uuid
+key = str(uuid.uuid4())
+```
+
+### Key Management Rules
+
+- Generate **one unique key per logical operation**
+- **Save the key locally** before sending the request
+- If you get **no response (network timeout)** → retry with the **same key**
+- If you get **SUCCESS or FAILED response** → clear the key, generate a new one for the next payment
+- If you get **409 Conflict** → wait a few seconds and retry with the **same key**
+- **Never reuse a key** for a different payment
+
+### Key Lifecycle
+```
+User initiates payment
+        │
+        ▼
+App generates UUID → saves to local storage
+        │
+        ▼
+Sends request with key
+        │
+   ┌────┴──────────────────┐
+   │                       │
+Got response           No response
+(SUCCESS or FAILED)    (network drop)
+   │                       │
+Clear key              Keep key
+Generate new key       Retry with same key
+for next payment
+```
+
+### Key Expiry
+
+- Keys expire after **24 hours**
+- After expiry the same key is treated as a brand new request
+- Always generate a new key for each new payment intent
+
+---
+
 ## API Reference
 
 ### POST /api/v1/payments
@@ -233,7 +292,7 @@ Creates a payment. Requires `Idempotency-Key` header.
 ```json
 {
   "transactionId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-  ...same fields as above...
+  "status": "SUCCESS",
   "replayed": true
 }
 ```
@@ -242,7 +301,7 @@ Creates a payment. Requires `Idempotency-Key` header.
 
 | Header | Description |
 |---|---|
-| `Idempotency-Key` | Echoes back the key |
+| `Idempotency-Key` | Echoes back the key for request correlation |
 | `Idempotent-Replayed` | `true` if this is a duplicate response |
 
 ---
@@ -319,32 +378,54 @@ All errors follow this consistent format:
 | Scenario | HTTP Status | Description |
 |---|---|---|
 | First request | 201 Created | Payment executed and persisted |
-| Duplicate (COMPLETED) | 200 OK | Stored response replayed from Redis |
-| Duplicate (FAILED) | 422 | Stored error response replayed |
-| Duplicate while IN_PROGRESS | 409 Conflict | Another thread is processing this key |
-| Same key, different payload | 422 | Protocol violation — rejected |
-| Missing Idempotency-Key header | 400 | Header is required |
-| Invalid request body | 400 | Validation failed with field errors |
-| Transaction not found | 404 | No transaction with given ID |
+| Duplicate (COMPLETED) | 200 OK | Stored success response replayed from Redis |
+| Duplicate (FAILED) | 200 OK | Stored failure response replayed from Redis |
+| Duplicate while IN_PROGRESS | 409 Conflict | Another thread is processing this key — retry after delay |
+| Same key, different payload | 422 | Protocol violation — key already used with different body |
+| Missing Idempotency-Key header | 400 | Header is required for all mutating operations |
+| Invalid request body | 400 | Validation failed — see fieldErrors |
+| Transaction not found | 404 | No transaction with given ID exists |
 
 ---
 
 ## Key Design Decisions
 
 ### Pessimistic Locking
-`SELECT ... FOR UPDATE` on `idempotency_records` prevents race conditions when two identical requests arrive simultaneously. The second request blocks on the DB lock until the first commits.
+`SELECT ... FOR UPDATE` on `idempotency_records` prevents race conditions when two identical requests arrive simultaneously. The second request blocks on the DB lock until the first commits, then finds the `IN_PROGRESS` record and returns 409.
 
 ### Two-Level Storage
-Redis provides O(1) fast-path for all repeat requests after first completion. MySQL is the authoritative source handling the first request and concurrent duplicates.
+Redis provides O(1) fast-path for all repeat requests after first completion. MySQL is the authoritative source handling the first request and concurrent duplicates. If Redis is lost — MySQL still has the complete record.
+```
+Redis  →  speed layer      (answers 99% of duplicate requests instantly)
+MySQL  →  truth layer      (permanent record, survives Redis restarts)
+```
+
+### Redis Storage Pattern
+
+Every completed payment creates two Redis entries:
+```
+idempotency:{key}        →  full JSON response      (TTL: 24 hours)
+idempotency:{key}:hash   →  SHA-256 of request body (TTL: 24 hours)
+
+Failed payments:
+idempotency:{key}        →  failure JSON response   (TTL: 1 hour)
+```
+
+The hash entry enables payload mismatch detection even on the Redis fast path.
 
 ### Separated Tables
-`idempotency_records` tracks request lifecycle. `payment_transactions` stores business domain data. They are linked by `idempotencyKey` string — not a foreign key — keeping the idempotency engine domain-agnostic and reusable.
+`idempotency_records` tracks request lifecycle. `payment_transactions` stores business domain data. They are linked by `idempotencyKey` string — not a foreign key — keeping the idempotency engine domain-agnostic and reusable for any future operation type (orders, refunds, subscriptions).
 
 ### SHA-256 Payload Hashing
-Request body is hashed and stored on first request. Duplicates with different payloads are detected and rejected with 422.
+Request body is hashed and stored on first request. Duplicates with different payloads are detected and rejected with 422 — even on the Redis fast path.
 
 ### REQUIRES_NEW Transaction Propagation
-Idempotency operations run in their own transactions so the pessimistic lock is released immediately after the check phase, not held for the entire payment duration.
+Idempotency operations run in their own transactions so the pessimistic lock is released immediately after the check phase, not held for the entire payment duration. This keeps lock contention minimal.
+
+### Stale Record Cleanup
+If a server crashes while processing a request the `IN_PROGRESS` record is never updated. A background scheduler runs every 60 seconds and marks any `IN_PROGRESS` record older than 5 minutes as `FAILED`. This unblocks clients from the 409 loop and allows them to retry with a new key.
+
+A second scheduler runs every hour and deletes expired records to keep the `idempotency_records` table size constant.
 
 ---
 
