@@ -36,8 +36,7 @@ public class PaymentController {
 
         log.info("POST /api/v1/payments | key={}", idempotencyKey);
 
-        PaymentResponse response = paymentService
-                .processPayment(idempotencyKey, request);
+        PaymentResponse response = paymentService.processPayment(idempotencyKey, request);
 
         HttpHeaders headers = new HttpHeaders();
         headers.set("Idempotency-Key", idempotencyKey);

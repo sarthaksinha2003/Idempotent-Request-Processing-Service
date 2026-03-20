@@ -41,16 +41,14 @@ public class IdempotencyService {
         log.debug("Checking idempotency key: {}", idempotencyKey);
 
         // Step 1: Check Redis cache first (fast path)
-        String cachedResponse = redisTemplate.opsForValue()
-                .get(cacheKey(idempotencyKey));
+        String cachedResponse = redisTemplate.opsForValue().get(cacheKey(idempotencyKey));
 
         if (cachedResponse != null) {
             log.debug("Cache HIT for key: {}", idempotencyKey);
 
             // Check payload hash even on cache hit
             String requestHash = hashUtil.computeHash(payload);
-            String storedHash = redisTemplate.opsForValue()
-                    .get(hashCacheKey(idempotencyKey));
+            String storedHash = redisTemplate.opsForValue().get(hashCacheKey(idempotencyKey));
 
             if (storedHash != null && !storedHash.equals(requestHash)) {
                 log.warn("Payload mismatch on cache hit for key: {}", idempotencyKey);
