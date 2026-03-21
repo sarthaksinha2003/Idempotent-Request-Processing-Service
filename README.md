@@ -431,13 +431,43 @@ A second scheduler runs every hour and deletes expired records to keep the `idem
 
 ## Deployment
 
-> This section will be updated when the service is deployed.
+Deployed on Railway.
 
-- [ ] Docker containerization
-- [ ] Environment-specific configuration
-- [ ] Production database setup
-- [ ] Redis cluster configuration
-- [ ] CI/CD pipeline
+**Base URL:**
+```
+https://idempotent-request-processing-service-production.up.railway.app
+```
+
+| Service | Platform |
+|---|---|
+| Backend | Railway (Docker) |
+| Database | Railway MySQL |
+| Cache | Railway Redis |
+
+---
+
+### Live Endpoints
+
+| Method | URL | Description |
+|---|---|---|
+| POST | https://idempotent-request-processing-service-production.up.railway.app/api/v1/payments | Create a payment |
+| GET | https://idempotent-request-processing-service-production.up.railway.app/api/v1/payments/{transactionId} | Get payment by transaction ID |
+| GET | https://idempotent-request-processing-service-production.up.railway.app/api/v1/payments/health | Service health check |
+| GET | https://idempotent-request-processing-service-production.up.railway.app/actuator/health | Spring Boot actuator health |
+
+---
+
+### Load Test Results
+
+Tested with Apache JMeter 5.6.3
+
+| Metric | Result |
+|---|---|
+| Concurrent requests | 1000 |
+| Error rate | 0.30% (free server network timeout) |
+| Duplicate protection | 100% |
+| Payments in DB after 1000 same-key requests | 1 |
+| Total payments in production DB | 108 |
 
 ---
 
